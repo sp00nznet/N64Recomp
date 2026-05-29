@@ -92,24 +92,30 @@ typedef uint64_t gpr;
 #define SUB32(a, b) \
     ((gpr)(int32_t)((a) - (b)))
 
+// Truncate to 32-bit before subtracting KSEG0 base to handle both
+// sign-extended (0xFFFFFFFF80XXXXXX) and zero-extended (0x0000000080XXXXXX)
+// register values. The (uint32_t) cast makes the subtraction well-defined.
+#define PHYS_ADDR(reg, offset) \
+    ((uint32_t)((reg) + (offset)) - (uint32_t)0x80000000)
+
 #define MEM_W(offset, reg) \
-    (*(int32_t*)(rdram + ((((reg) + (offset))) - 0xFFFFFFFF80000000)))
+    (*(int32_t*)(rdram + PHYS_ADDR(reg, offset)))
 
 #define MEM_H(offset, reg) \
-    (*(int16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
+    (*(int16_t*)(rdram + (PHYS_ADDR(reg, offset) ^ 2)))
 
 #define MEM_B(offset, reg) \
-    (*(int8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
+    (*(int8_t*)(rdram + (PHYS_ADDR(reg, offset) ^ 3)))
 
 #define MEM_HU(offset, reg) \
-    (*(uint16_t*)(rdram + ((((reg) + (offset)) ^ 2) - 0xFFFFFFFF80000000)))
+    (*(uint16_t*)(rdram + (PHYS_ADDR(reg, offset) ^ 2)))
 
 #define MEM_BU(offset, reg) \
-    (*(uint8_t*)(rdram + ((((reg) + (offset)) ^ 3) - 0xFFFFFFFF80000000)))
+    (*(uint8_t*)(rdram + (PHYS_ADDR(reg, offset) ^ 3)))
 
 #define SD(val, offset, reg) { \
-    *(uint32_t*)(rdram + ((((reg) + (offset) + 4)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 0); \
-    *(uint32_t*)(rdram + ((((reg) + (offset) + 0)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 32); \
+    *(uint32_t*)(rdram + PHYS_ADDR(reg, offset + 4)) = (uint32_t)((gpr)(val) >> 0); \
+    *(uint32_t*)(rdram + PHYS_ADDR(reg, offset + 0)) = (uint32_t)((gpr)(val) >> 32); \
 }
 
 static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {
