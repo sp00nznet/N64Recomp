@@ -798,6 +798,20 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
             vram += 4;
         }
 
+        // hi/lo are C locals, so a value left in them by a function that falls through into this one
+        // would be lost. If this function reads hi or lo before anything writes them, it can only be
+        // relying on such a value, so take it from the context (where the fallthrough left it).
+        for (const auto& instr : instructions) {
+            auto id = instr.getUniqueId();
+            if (id == InstrId::cpu_mfhi || id == InstrId::cpu_mflo) {
+                fmt::print(output_file, "    hi = ctx->hi; lo = ctx->lo;\n");
+                break;
+            }
+            if (instr.modifiesHI() || instr.modifiesLO()) {
+                break;
+            }
+        }
+
         // Analyze function
         N64Recomp::FunctionStats stats{};
         if (!N64Recomp::analyze_function(context, func, instructions, stats)) {
@@ -863,6 +877,43 @@ bool recompile_function_impl(GeneratorType& generator, const N64Recomp::Context&
             in_likely_delay_slot = is_branch_likely;
             // Advance the vram address by the size of one instruction
             vram += 4;
+        }
+
+        // If the code can run off the end of the function, real hardware keeps executing the next
+        // function in memory. Ending the C function with a plain return would skip it, so emit a
+        // tail call when that next address is a known function. The end is unreachable when the
+        // last non-nop instruction is, or is the delay slot of, an unconditional jump.
+        auto is_terminal = [](const rabbitizer::InstructionCpu& in) {
+            auto id = in.getUniqueId();
+            return id == InstrId::cpu_jr || id == InstrId::cpu_j || id == InstrId::cpu_b || id == InstrId::cpu_eret;
+        };
+        size_t last = instructions.size();
+        while (last > 0 && instructions[last - 1].getUniqueId() == InstrId::cpu_nop) {
+            last--;
+        }
+        bool terminated = (last > 0 && is_terminal(instructions[last - 1])) ||
+                          (last > 1 && is_terminal(instructions[last - 2]));
+        if (!terminated && !instructions.empty()) {
+            uint32_t next_vram = func.vram + (uint32_t)(instructions.size() * sizeof(uint32_t));
+            size_t next_index = (size_t)-1;
+            if (resolve_jal(context, func.section_index, next_vram, next_index) != JalResolutionResult::Match) {
+                fmt::print(stderr, "[Warn] Function {} can run off its end at 0x{:08X}, which is not a known function\n", func.name, next_vram);
+            }
+            else if (context.functions[next_index].ignored) {
+                // Ignored functions have no definition to call, so keep the old behaviour.
+                fmt::print(stderr, "[Warn] Function {} can run off its end into ignored function {}\n", func.name, context.functions[next_index].name);
+            }
+            else {
+                fmt::print("[Info] Fallthrough in {} to {}\n", func.name, context.functions[next_index].name);
+                fmt::print(output_file, "    ");
+                generator.emit_comment(fmt::format("Fallthrough into {}", context.functions[next_index].name));
+                // Hand hi/lo over to the next function (see the matching load at function start).
+                fmt::print(output_file, "    ctx->hi = hi; ctx->lo = lo;\n");
+                fmt::print(output_file, "    ");
+                generator.emit_function_call(context, next_index);
+                fmt::print(output_file, "    ");
+                generator.emit_return(context, func_index);
+            }
         }
     }
 
